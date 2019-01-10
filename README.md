@@ -1,10 +1,9 @@
-<h1 align="center">Discord Mod Mail Bot</h1>
-
 <div align="center">
+    <img src='https://i.imgur.com/o558Qnq.png' align='center'>
+    <br>
     <strong><i>A simple and functional modmail bot.</i></strong>
     <br>
     <br>
-
 
 
 <a href="https://heroku.com/deploy?template=https://github.com/kyb3r/modmail">
@@ -30,10 +29,6 @@
 
 </div>
 <br>
-<div align="center">
-    This is an open source discord bot made by kyb3r and improved upon suggestions by the users! It enables server members to DM it, the messages then get relayed to the server moderators who can then respond through the bot. In essence this bot serves as a means for members to easily communicate with server leadership in an organised manner.
-
-</div>
 
 ## How does it work?
 
