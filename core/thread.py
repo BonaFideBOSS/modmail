@@ -23,6 +23,8 @@ class Thread:
         self.recipient = recipient
         self.channel = None
         self.ready_event = asyncio.Event()
+        self.close_task = None
+        self.close_after = 0 # seconds
 
     def __repr__(self):
         return f'Thread(recipient="{self.recipient}", channel={self.channel.id})'
@@ -39,10 +41,80 @@ class Thread:
     def ready(self, flag):
         if flag is True:
             self.ready_event.set()
+    
+    async def _close_after(self, after, **kwargs):
+        await asyncio.sleep(after)
+        kwargs['scheduled'] = True
+        await self.close(**kwargs)
 
-    def close(self):
+    async def close(self, *, closer, after=0, silent=False, delete_channel=True, message=None, scheduled=False):
+        '''Close a thread now or after a set time in seconds'''
+        if self.close_task is not None and not self.close_task.cancelled():
+            if not scheduled or after > 0:
+                self.close_task.cancel()
+
+        if after > 0:
+            self.close_task = asyncio.create_task(self._close_after(after, closer=closer, silent=silent, message=message))
+            return 
+
         del self.manager.cache[self.id]
-        return self.channel.delete()
+        if str(self.id) in self.bot.config.subscriptions:
+            del self.bot.config.subscriptions[str(self.id)]
+
+        # Logging
+        log_data = await self.bot.modmail_api.post_log(self.channel.id, {
+            'open': False, 'closed_at': str(datetime.datetime.utcnow()), 'closer': {
+                'id': str(closer.id),
+                'name': closer.name,
+                'discriminator': closer.discriminator,
+                'avatar_url': closer.avatar_url,
+                'mod': True
+            }
+        })
+
+        if isinstance(log_data, str):
+            print(log_data) # errored somehow on server
+
+        if self.bot.selfhosted:
+            log_url = f'{self.bot.config.log_url}/logs/{log_data["key"]}'
+        else:
+            log_url = f"https://logs.modmail.tk/{log_data['user_id']}/{log_data['key']}" 
+
+        user = self.recipient.mention if self.recipient else f'`{self.id}`'
+
+        if log_data['messages']:
+            msg = str(log_data['messages'][0]['content'])
+            sneak_peak = msg if len(msg) < 50 else msg[:48] + '...'
+        else:
+            sneak_peak = 'No content'
+
+        desc = f"{user} [`{log_data['key']}`]({log_url}): {sneak_peak}"
+
+        em = discord.Embed(description=desc, color=discord.Color.red())
+
+        event = 'Thread Closed as Scheduled' if scheduled else 'Thread Closed'
+        # em.set_author(name=f'Event: {event}', url=log_url)
+        em.set_footer(text=f'{event} by {closer} ({closer.id})')
+        em.timestamp = datetime.datetime.utcnow()
+
+        tasks = [
+            self.bot.log_channel.send(embed=em),
+            self.bot.config.update()
+        ]
+
+        # Thread closed message 
+
+        em = discord.Embed(title='Thread Closed')
+        em.description = message or f'{closer.mention} has closed this modmail thread.'
+        em.color = discord.Color.red()
+
+        if not silent and self.recipient is not None:
+            tasks.append(self.recipient.send(embed=em))
+        
+        if delete_channel:
+            tasks.append(self.channel.delete())
+        
+        await asyncio.gather(*tasks)
 
     async def _edit_thread_message(self, channel, message_id, message):
         async for msg in channel.history():
@@ -66,14 +138,24 @@ class Thread:
     async def reply(self, message):
         if not message.content and not message.attachments:
             raise commands.UserInputError
-        if self.recipient not in self.bot.guild.members:
-            return await message.channel.send('This user is no longer in the server and is thus unreachable.')
-        await asyncio.gather(
+        if all(not g.get_member(self.id) for g in self.bot.guilds):
+            return await message.channel.send(embed=discord.Embed(color=discord.Color.red(), description='This user shares no servers with me and is thus unreachable.'))
+
+        tasks = [
             self.send(message, self.channel, from_mod=True),  # in thread channel
             self.send(message, self.recipient, from_mod=True)  # to user
-        )
+            ]
+
+        if self.close_task is not None and not self.close_task.cancelled():
+            self.close_task.cancel() # cancel closing if a thread message is sent.
+            tasks.append(self.channel.send(embed=discord.Embed(color=discord.Color.red(), description='Scheduled close has been cancelled.')))
+
+        await asyncio.gather(*tasks)
 
     async def send(self, message, destination=None, from_mod=False, delete_message=True):
+        if self.close_task is not None and not self.close_task.cancelled():
+            self.close_task.cancel() # cancel closing if a thread message is sent.
+            await self.channel.send(embed=discord.Embed(color=discord.Color.red(), description='Scheduled close has been cancelled.'))
         if not self.ready:
             await self.wait_until_ready()
 
@@ -123,6 +205,7 @@ class Thread:
         
         file_upload_count = 1
 
+
         for att in attachments:
             em.add_field(name=f'File upload ({file_upload_count})', value=f'[{att[1]}]({att[0]})')
             file_upload_count += 1
@@ -135,13 +218,33 @@ class Thread:
             em.set_footer(text=f'User')
 
         await destination.trigger_typing()
-        await destination.send(embed=em)
+
+        if not from_mod:
+            mentions = self.get_notifications()
+        else:
+            mentions = None
+            
+        await destination.send(mentions, embed=em)
 
         if delete_message:
             try:
                 await message.delete()
             except:
                 pass
+        
+    def get_notifications(self):
+        config = self.bot.config
+        key = str(self.id)
+
+        mentions = []
+        mentions.extend(config['subscriptions'].get(key, []))
+
+        if key in config['notification_squad']:
+            mentions.extend(config['notification_squad'][key])
+            del config['notification_squad'][key]
+            asyncio.create_task(config.update())
+        
+        return ' '.join(mentions)
 
 
 class ThreadManager:
@@ -224,8 +327,8 @@ class ThreadManager:
         """Creates a modmail thread"""
 
         em = discord.Embed(
-            title='Thread started' if creator else 'Thanks for the message!',
-            description='The moderation team will get back to you as soon as possible!',
+            title='Thread created!',
+            description=self.bot.config.get('thread_creation_response', 'The moderation team will get back to you as soon as possible!'),
             color=discord.Color.green()
         )
 
@@ -325,7 +428,10 @@ class ThreadManager:
         if member:
             seperate_server = self.bot.guild != self.bot.modmail_guild
             roles = sorted(member.roles, key=lambda c: c.position)
-            rolenames = ' '.join(r.mention if not seperate_server else r.name for r in roles if r.name != "@everyone")
+            if seperate_server:
+                rolenames = ', '.join(r.name for r in roles if r.name != "@everyone")
+            else:
+                rolenames = ' '.join(r.mention for r in roles if r.name != "@everyone")
 
         em = discord.Embed(colour=dc, description=desc, timestamp=time)
 

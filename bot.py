@@ -22,7 +22,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 """
 
-__version__ = '2.0.10'
+__version__ = '2.4.4'
 
 import asyncio
 import textwrap
@@ -33,12 +33,15 @@ from types import SimpleNamespace
 
 import discord
 import aiohttp
+from discord.enums import ActivityType
 from discord.ext import commands
 from discord.ext.commands.view import StringView
+from motor.motor_asyncio import AsyncIOMotorClient
+
 from colorama import init, Fore, Style
 import emoji
 
-from core.api import Github, ModmailApiClient
+from core.clients import Github, ModmailApiClient, SelfhostedClient
 from core.thread import ThreadManager
 from core.config import ConfigManager
 from core.changelog import ChangeLog
@@ -58,7 +61,10 @@ class ModmailBot(commands.Bot):
         self.threads = ThreadManager(self)
         self.session = aiohttp.ClientSession(loop=self.loop)
         self.config = ConfigManager(self)
-        self.modmail_api = ModmailApiClient(self)
+        self.selfhosted = bool(self.config.get('mongo_uri'))
+        if self.selfhosted:
+            self.db = AsyncIOMotorClient(self.config.mongo_uri).modmail_bot
+        self.modmail_api = SelfhostedClient(self) if self.selfhosted else ModmailApiClient(self)
         self.data_task = self.loop.create_task(self.data_loop())
         self.autoupdate_task = self.loop.create_task(self.autoupdate_loop())
         self._add_commands()
@@ -158,14 +164,26 @@ class ModmailBot(commands.Bot):
         return [bot.prefix, f'<@{bot.user.id}> ', f'<@!{bot.user.id}> ']
 
     async def on_connect(self):
-        print(line + Fore.RED + Style.BRIGHT)
-        await self.validate_api_token()
         print(line)
+        print(Fore.CYAN, end='')
+        if not self.selfhosted:
+            print('MODE: Using the Modmail API')
+            print(line)
+            await self.validate_api_token()
+            print(line)
+        else:
+            print('Mode: Selfhosting logs.')
+            print(line)
         print(Fore.CYAN + 'Connected to gateway.')
         await self.config.refresh()
-        status = self.config.get('status')
-        if status:
-            await self.change_presence(activity=discord.Game(status))
+
+        activity_type = self.config.get('activity_type')
+        message = self.config.get('activity_message')
+        if activity_type is not None and message:
+            url = self.config.get('twitch_url', 'https://www.twitch.tv/discord-modmail/') if activity_type == ActivityType.streaming else None
+            activity = discord.Activity(type=activity_type, name=message,
+                                        url=url)
+            await self.change_presence(activity=activity)
 
     async def on_ready(self):
         """Bot startup, sets uptime."""
@@ -259,7 +277,8 @@ class ModmailBot(commands.Bot):
         ctx.command = self.all_commands.get(invoker)
         
         if ctx.command is self.get_command('eval') and hasattr(ctx, '_alias_invoked'):
-            ctx.command.checks = None # Let anyone use the command.
+            # ctx.command.checks = None # Let anyone use the command.
+            pass
 
         return ctx
 
@@ -283,46 +302,21 @@ class ModmailBot(commands.Bot):
     async def on_guild_channel_delete(self, channel):
         if channel.guild != self.modmail_guild:
             return 
+
+        mod = None 
+        audit_logs = self.modmail_guild.audit_logs()
+        entry = await audit_logs.find(lambda e: e.target.id == channel.id)
+        mod = entry.user
+
+        if mod.bot:
+            return
+        
         thread = await self.threads.find(channel=channel)
-        if thread:
-            del self.threads.cache[thread.id]
+        if not thread:
+            return
+        
+        await thread.close(closer=mod, silent=True, delete_channel=False)
 
-            mod = None 
-
-            audit_logs = self.modmail_guild.audit_logs()
-            entry = await audit_logs.find(lambda e: e.target.id == channel.id)
-            mod = entry.user
-            if mod.bot:
-                return
-
-            log_data = await self.modmail_api.post_log(channel.id, {
-                'open': False,
-                'closed_at': str(datetime.datetime.utcnow()),
-                'closer': {
-                    'id': str(mod.id),
-                    'name': mod.name,
-                    'discriminator': mod.discriminator,
-                    'avatar_url': mod.avatar_url,
-                    'mod': True
-                }})
-
-            em = discord.Embed(title='Thread Closed')
-            em.description = f'{mod.mention} has closed this modmail thread.'
-            em.color = discord.Color.red()
-
-            try:
-                await thread.recipient.send(embed=em)
-            except:
-                pass
-            
-            log_url = f"https://logs.modmail.tk/{log_data['user_id']}/{log_data['key']}"
-
-            user = thread.recipient.mention if thread.recipient else f'`{thread.id}`'
-
-            desc = f"[`{log_data['key']}`]({log_url}) {mod.mention} closed a thread with {user}"
-            em = discord.Embed(description=desc, color=em.color)
-            em.set_author(name='Thread closed', url=log_url)
-            await self.log_channel.send(embed=em)
 
     async def on_message_delete(self, message):
         """Support for deleting linked messages"""
@@ -379,12 +373,16 @@ class ModmailBot(commands.Bot):
         try:
             self.config.modmail_api_token
         except KeyError:
+            print(Fore.RED + Style.BRIGHT, end='')
             print('MODMAIL_API_TOKEN not found.')
             print('Set a config variable called MODMAIL_API_TOKEN with a token from https://dashboard.modmail.tk')
+            print('If you want to selfhost logs, input a MONGO_URI config variable.')
+            print('A modmail api token is not needed if you are selfhosting logs.')
             valid = False
         else:
             valid = await self.modmail_api.validate_token()
             if not valid:
+                print(Fore.RED + Style.BRIGHT, end='')
                 print('Invalid MODMAIL_API_TOKEN - get one from https://dashboard.modmail.tk')
         finally:
             if not valid:
@@ -396,9 +394,12 @@ class ModmailBot(commands.Bot):
 
     async def data_loop(self):
         await self.wait_until_ready()
+        self.owner = (await self.application_info()).owner
 
         while True:
             data = {
+                "owner_name": str(self.owner),
+                "owner_id": self.owner.id,
                 "bot_id": self.user.id,
                 "bot_name": str(self.user),
                 "guild_id": self.guild_id,
@@ -406,7 +407,8 @@ class ModmailBot(commands.Bot):
                 "member_count": len(self.guild.members),
                 "uptime": (datetime.datetime.utcnow() - self.start_time).total_seconds(),
                 "latency": f'{self.ws.latency * 1000:.4f}',
-                "version": __version__
+                "version": __version__,
+                "selfhosted": self.selfhosted
             }
 
             await self.modmail_api.post_metadata(data)
@@ -414,11 +416,18 @@ class ModmailBot(commands.Bot):
             await asyncio.sleep(3600)
 
     async def autoupdate_loop(self):
-        while True:
-            if self.config.get('disable_autoupdates'):
-                await asyncio.sleep(3600)
-                continue
+        await self.wait_until_ready()
 
+        if self.config.get('disable_autoupdates'):
+            print('Autoupdates disabled.')
+            return 
+
+        if self.selfhosted and not self.config.get('github_access_token'):
+            print('Github access token not found.')
+            print('Autoupdates disabled.')
+            return 
+
+        while True:
             metadata = await self.modmail_api.get_metadata()
 
             if metadata['latest_version'] != self.version:

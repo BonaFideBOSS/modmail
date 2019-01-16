@@ -4,6 +4,81 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+# v2.4.4
+### Fixed
+Fixed a bug in activity command where it would fail to set the activity on bot restart if the activity type was `playing` 
+
+# v2.4.3
+Moved selfhosted log viewer to a seperate repo. 
+This update shouldn't affect anyone.
+
+# v2.4.2
+
+### Added 
+- Ability to set your own twitch url for streaming status.
+
+# v2.4.1
+
+### Fixed 
+- Small bug in activity command. 
+
+# v2.4.0
+
+Breaking changes for bot status.
+
+### Added 
+- Added the `activity` command for setting the activity
+- [PR #131](https://github.com/kyb3r/modmail/pull/131#issue-244686818) this supports multiple activity types (playing, watching, listening and streaming).
+
+### Removed
+- Removed the deprecated `status` command. 
+- This also means you will have to reset your bot status with the `activity` command as it will break. 
+
+# v2.3.0
+
+### Added 
+- Ability to self host logs 
+
+### Changed
+- Improved format for log channel embeds.
+- Roles are now comma seperated in info embed
+- This only applies to seperate server setups
+
+### Fixed
+- Bug in subscribe command, it will now unsub after a thread is closed.
+
+
+# v2.2.0
+### Added
+- Added a notify command `notify [role]`
+    - Notify a given role or yourself to the next thread message received.
+    - Once a thread message is received you will be pinged once only.
+
+- Added a subscribe command `sub [role]` / `unsub [role]`
+    - Subscribes yourself or a given role to be notified when thread messages are received.
+    - You will be pinged for every thread message recieved until you unsubscribe.
+
+### Changed
+- Improve log channel message format slightly.
+
+# v2.1.1
+
+### Fixed
+- Small bug in close command.
+
+# v2.1.0
+
+### Added
+- Ability to set a custom thread creation response message.
+    - Do this via `config set thread_creation_response [message]`
+
+### Changed
+- Improve logs command format.
+- Improve thread log channel message to have more relevant info.
+- Improve close command.
+    - You now can close the thread after a delay and use a custom thread close message.
+    - You also now have the ability to close a thread silently.
+
 # v2.0.10
 
 ### Security
